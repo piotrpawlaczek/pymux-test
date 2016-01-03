@@ -248,7 +248,7 @@ class Window(object):
                     return pane.name
                 else:
                     # Name from the process running inside the pane.
-                    name = pane.process.get_name()
+                    name = pane.process.name
                     if name:
                         return os.path.basename(name)
 

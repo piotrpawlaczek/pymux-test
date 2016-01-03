@@ -8,10 +8,15 @@ from prompt_toolkit.eventloop.posix_utils import PosixStdinReader
 from prompt_toolkit.document import Document
 from pygments.token import Token
 
+try:
+    from Queue import Queue, Empty
+except ImportError:
+    from queue import Queue, Empty  # python 3.x
+
 from .key_mappings import prompt_toolkit_key_to_vt100_key
 from .screen import BetterScreen
 from .stream import BetterStream
-from .utils import set_terminal_size, pty_make_controlling_tty
+from .utils import set_terminal_size, pty_make_controlling_tty, cached_property
 
 import os
 import resource
@@ -19,6 +24,8 @@ import signal
 import sys
 import time
 import traceback
+import subprocess
+import threading
 
 __all__ = (
     'Process',
@@ -300,13 +307,14 @@ class Process(object):
         """
         return get_cwd_for_pid(self.pid)
 
-    def get_name(self):
+    @cached_property(2)
+    def name(self):
         """
-        The name for this process. (Or `None` when unknown.)
+        Cached name for this process. (Or `None` when unknown.)
         """
-        # TODO: Maybe cache for short time.
         if self.master is not None:
             return get_name_for_fd(self.master)
+
 
     def send_signal(self, signal):
         " Send signal to running process. "
@@ -390,11 +398,48 @@ def get_name_for_fd(fd):
     """
     Return the process name for a given process ID.
     """
-    if sys.platform in ('linux', 'linux2'):
-        pgrp = os.tcgetpgrp(fd)
+    def get_name_from_osx():
+        """
+        Read name from ps stream (non-blocking).
+        This should actually work on linux, windows and osx.
+        """
 
+        def enqueue(out, queue):
+            for line in iter(out.readline, b''):
+                queue.put(line)
+                out.close()
+
+        p = subprocess.Popen(['ps', '-o', 'comm=', '-p', str(pgrp)],
+                             stdout=subprocess.PIPE,
+                             bufsize=1,
+                             close_fds='posix' in sys.builtin_module_names)
+        q = Queue()
+        t = threading.Thread(target=enqueue, args=(p.stdout, q))
+        t.daemon = True  # kill all threads on exit (clean shutdown)
+        t.start()
+
+        try:
+            line = q.get_nowait()
+        except Empty:
+            pass
+        except (OSError, subprocess.CalledProcessError):
+            # e.g: ps returns a non-zero exit status
+            # or ps is not installed
+            pass
+        else:
+            return line
+
+    def get_name_from_linux():
         try:
             with open('/proc/%s/cmdline' % pgrp, 'rb') as f:
                 return f.read().decode('utf-8', 'ignore').split('\0')[0]
         except IOError:
             pass
+
+    if sys.platform in ('darwin', 'linux', 'linux2'):
+        pgrp = os.tcgetpgrp(fd)
+
+        if sys.platform in ('linux', 'linux2'):
+            return get_name_from_linux()
+        elif sys.platform == 'darwin':
+            return get_name_from_osx()
